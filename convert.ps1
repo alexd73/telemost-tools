@@ -3,145 +3,207 @@ param(
     [Parameter(Mandatory = $false)]
     [switch]$rewrite,
     [Parameter(Mandatory = $false)]
-    [switch]$skipMp3
+    [switch]$skipMp3,
+    [Parameter(Mandatory = $false)]
+    [switch]$skipRename
 )
 
-# Корневая папка проекта
-$rootPath = $PSScriptRoot
-
-# Вызываем скрипт для переименования файлов по дате
-$fixFileNameDateScript = Join-Path $rootPath "fixfilenamedate.ps1"
-if (Test-Path $fixFileNameDateScript) {
-    Write-Host "Запускаю переименование файлов по дате..." -ForegroundColor Cyan
-    & $fixFileNameDateScript
-}
-else {
-    Write-Host "Скрипт fixfilenamedate.ps1 не найден, пропускаем переименование." -ForegroundColor Yellow
-}
-
-# Проверяем, установлен ли ffmpeg
-if (-not (Get-Command "ffmpeg" -ErrorAction SilentlyContinue)) {
-    Write-Host "FFmpeg не найден. Убедитесь, что FFmpeg установлен и доступен в PATH." -ForegroundColor Red
-    exit 1
+# ============================================
+# Конфигурация
+# ============================================
+$Configuration = @{
+    RootPath      = $PSScriptRoot
+    OutFolder     = 'out'
+    DelFolder     = 'del'
+    SkipMp3       = $skipMp3
+    Rewrite       = $rewrite
+    Interactive   = $true
+    SkipRename    = $skipRename
+    FfmpegCommand = 'ffmpeg'
 }
 
-# Создаем папку del, если её нет
-$delFolder = Join-Path $rootPath "del"
-if (-not (Test-Path $delFolder)) {
-    New-Item -ItemType Directory -Path $delFolder | Out-Null
-    Write-Host "Создана папка: $delFolder" -ForegroundColor Green
-}
-
-# Создаем папку out, если её нет
-$outFolder = Join-Path $rootPath "out"
-if (-not (Test-Path $outFolder)) {
-    New-Item -ItemType Directory -Path $outFolder | Out-Null
-    Write-Host "Создана папка: $outFolder" -ForegroundColor Green
-}
-
-# Получаем все файлы .webm в корневой папке
-$files = Get-ChildItem -Path $rootPath -File -Filter *.webm
-
-if ($files.Count -eq 0) {
-    Write-Host "Файлы с расширением .webm не найдены в корневой папке." -ForegroundColor Yellow
-    exit
-}
-
-foreach ($file in $files) {
-    # Определяем имя выходного файла для MP4 в папке out
-    $outputMp4File = Join-Path $outFolder ([System.IO.Path]::ChangeExtension($file.Name, ".mp4"))
-
-    # Определяем имя выходного файла для MP3 в папке out
-    $outputMp3File = Join-Path $outFolder ([System.IO.Path]::ChangeExtension($file.Name, ".mp3"))
-    
-    $skipMp4Conversion = $false
-    $skipMp3Conversion = $false
-    $mp3Created = $false
-    
-    # Проверяем, существует ли уже выходной файл MP4
-    if ((Test-Path $outputMp4File) -and (-not $rewrite)) {
-        Write-Host "Файл $outputMp4File уже существует. Пропускаем конвертацию в MP4: $($file.Name)" -ForegroundColor Yellow
-        $skipMp4Conversion = $true
+# ============================================
+# Логгер
+# ============================================
+function Write-Log {
+    param(
+        [string]$Message,
+        [ValidateSet('Info', 'Success', 'Warning', 'Error')]
+        [string]$Level = 'Info'
+    )
+    $colors = @{
+        Info    = 'White'
+        Success = 'Green'
+        Warning = 'Yellow'
+        Error   = 'Red'
     }
-    
-    # Проверяем, нужно ли пропустить конвертацию в MP3 (параметр skipMp3 или файл уже существует)
-    if ($skipMp3) {
-        $skipMp3Conversion = $true
-    }
-    elseif ((Test-Path $outputMp3File) -and (-not $rewrite)) {
-        Write-Host "Файл $outputMp3File уже существует. Пропускаем конвертацию в MP3: $($file.Name)" -ForegroundColor Yellow
-        $skipMp3Conversion = $true
-    }
-    
-    # Если оба файла существуют и rewrite не включен, пропускаем файл полностью
-    if ($skipMp4Conversion -and $skipMp3Conversion) {
-        continue
-    }
-    
-    # Этап 1: Конвертация в MP4
-    if (-not $skipMp4Conversion) {
-        Write-Host "Конвертирую в MP4: $($file.Name) -> $([System.IO.Path]::GetFileName($outputMp4File))" -ForegroundColor Cyan
-        
-        try {
-            # Формируем аргументы как строку для правильной обработки путей с пробелами
-            $arguments = "-i `"$($file.FullName)`" -c:v libx265 -preset slow -crf 26 -c:a aac -b:a 96k `"$outputMp4File`""
-            $process = Start-Process -FilePath "ffmpeg" -ArgumentList $arguments -Wait -NoNewWindow -PassThru
+    Write-Host $Message -ForegroundColor $colors[$Level]
+}
 
-            # Проверяем код возврата процесса
-            if ($process.ExitCode -ne 0) {
-                Write-Host "Ошибка при конвертации в MP4: $($file.Name)" -ForegroundColor Red
-                continue
-            }
+# ============================================
+# Проверка зависимостей
+# ============================================
+function Test-FfmpegInstalled {
+    param([string]$Command = 'ffmpeg')
+    return $null -ne (Get-Command $Command -ErrorAction SilentlyContinue)
+}
 
-            Write-Host "Конвертация в MP4 завершена успешно: $($file.Name)" -ForegroundColor Green
+# ============================================
+# Управление папками
+# ============================================
+function New-ItemIfNotExists {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) {
+        New-Item -ItemType Directory -Path $Path | Out-Null
+        Write-Log "Создана папка: $Path" -Level Success
+    }
+}
+
+# ============================================
+# Конвертер
+# ============================================
+function Invoke-FfmpegConvert {
+    param(
+        [string]$InputFile,
+        [string]$OutputFile,
+        [string]$Arguments,
+        [string]$FormatName
+    )
+
+    Write-Log "Конвертирую в $FormatName`: $(Split-Path $InputFile -Leaf) -> $(Split-Path $OutputFile -Leaf)" -Level Info
+
+    try {
+        $process = Start-Process -FilePath $Configuration.FfmpegCommand `
+            -ArgumentList $Arguments `
+            -Wait -NoNewWindow -PassThru
+
+        if ($process.ExitCode -ne 0) {
+            Write-Log "Ошибка при конвертации в $FormatName" -Level Error
+            return $false
         }
-        catch {
-            Write-Host "Ошибка при конвертации в MP4: $_" -ForegroundColor Red
-            continue
-        }
+
+        Write-Log "Конвертация в $FormatName завершена успешно" -Level Success
+        return $true
+    }
+    catch {
+        Write-Log "Ошибка при конвертации в $FormatName`: $_" -Level Error
+        return $false
+    }
+}
+
+# ============================================
+# Получение аргументов для конвертации
+# ============================================
+function Get-Mp4Arguments {
+    param([string]$InputFile, [string]$OutputFile)
+    return "-i `"$InputFile`" -c:v libx265 -preset slow -crf 26 -c:a aac -b:a 96k `"$OutputFile`""
+}
+
+function Get-Mp3Arguments {
+    param([string]$InputFile, [string]$OutputFile)
+    return "-i `"$InputFile`" -af silenceremove=start_periods=1:start_duration=0:start_threshold=-25dB:stop_periods=-1:stop_duration=1:stop_threshold=-25dB:detection=peak -ac 1 -ar 44100 -c:a libmp3lame -b:a 80k -q:a 4 -map a `"$OutputFile`""
+}
+
+# ============================================
+# Проверка необходимости конвертации
+# ============================================
+function Test-ShouldConvert {
+    param(
+        [string]$OutputFile,
+        [bool]$Rewrite,
+        [bool]$SkipConversion
+    )
+
+    if ($SkipConversion) { return $false }
+    if ($Rewrite) { return $true }
+    if (Test-Path $OutputFile) {
+        Write-Log "Файл $(Split-Path $OutputFile -Leaf) уже существует. Пропускаем." -Level Warning
+        return $false
+    }
+    return $true
+}
+
+# ============================================
+# Перемещение файлов
+# ============================================
+function Move-OriginalToDel {
+    param(
+        [string]$SourceFile,
+        [string]$DestFolder
+    )
+    Move-Item -Path $SourceFile -Destination $DestFolder -ErrorAction SilentlyContinue
+    Write-Log "Оригинальный файл перемещен: $(Split-Path $SourceFile -Leaf)" -Level Success
+}
+
+# ============================================
+# Основная логика
+# ============================================
+function Start-Conversion {
+    # Проверка зависимостей
+    if (-not (Test-FfmpegInstalled -Command $Configuration.FfmpegCommand)) {
+        Write-Log "FFmpeg не найден. Убедитесь, что установлен и доступен в PATH." -Level Error
+        exit 1
     }
     
-    # Этап 2: Конвертация исходного файла в MP3 (если не пропущено)
-    if (-not $skipMp3Conversion) {
-        Write-Host "Конвертирую в MP3: $($file.Name) -> $([System.IO.Path]::GetFileName($outputMp3File))" -ForegroundColor Cyan
-        
-        try {
-            # Формируем аргументы как строку для правильной обработки путей с пробелами
-            $arguments = "-i `"$($file.FullName)`" -af silenceremove=start_periods=1:start_duration=0:start_threshold=-25dB:stop_periods=-1:stop_duration=1:stop_threshold=-25dB:detection=peak -ac 1 -ar 44100 -c:a libmp3lame -b:a 80k -q:a 4 -map a `"$outputMp3File`""
-            $process = Start-Process -FilePath "ffmpeg" -ArgumentList $arguments -Wait -NoNewWindow -PassThru
-            
-            # Проверяем код возврата процесса (стандартный способ проверки успешности)
-            if ($process.ExitCode -ne 0) {
-                Write-Host "Ошибка при конвертации в MP3: $($file.Name)" -ForegroundColor Red
-            }
-            else {
-                Write-Host "Конвертация в MP3 завершена успешно с удалением тишины: $([System.IO.Path]::GetFileName($outputMp3File))" -ForegroundColor Green
-                $mp3Created = $true
-            }
-        }
-        catch {
-            # Перехватываем исключения при запуске процесса (файл заблокирован, недостаточно памяти и т.д.)
-            Write-Host "Ошибка при конвертации в MP3: $_" -ForegroundColor Red
-        }
-    }
+    # Создание папок
+    $outPath = Join-Path $Configuration.RootPath $Configuration.OutFolder
+    $delPath = Join-Path $Configuration.RootPath $Configuration.DelFolder
+    New-ItemIfNotExists -Path $outPath
+    New-ItemIfNotExists -Path $delPath
     
-    # Перемещаем оригинальный файл в папку del если создан требуемый выходной файл
-    # Если skipMp3 - перемещаем при успешном MP4, иначе при успешном MP3
-    $shouldMove = $false
-    
-    if ($skipMp3) {
-        # Если MP3 пропущен, перемещаем только если MP4 успешно создан в этом запуске
-        $shouldMove = (-not $skipMp4Conversion)
+    # Запуск переименования
+    if (-not $Configuration.SkipRename) {
+        $fixScript = Join-Path $Configuration.RootPath "fixfilenamedate.ps1"
+        if (Test-Path $fixScript) {
+            Write-Log "Запускаю переименование файлов по дате..." -Level Info
+            & $fixScript -interactive
+        }
     }
     else {
-        # Если MP3 требуется, перемещаем если MP3 успешно создан в этом запуске
-        $shouldMove = $mp3Created
+        Write-Log "Переименование файлов пропущено." -Level Info
     }
     
-    if ($shouldMove) {
-        Move-Item -Path $file.FullName -Destination $delFolder -ErrorAction SilentlyContinue
-        Write-Host "Оригинальный файл перемещен в папку del: $($file.Name)" -ForegroundColor Green
+    # Получение файлов
+    $files = Get-ChildItem -Path $Configuration.RootPath -File -Filter *.webm
+    if ($files.Count -eq 0) {
+        Write-Log "Файлы .webm не найдены." -Level Warning
+        exit
     }
+    
+    # Обработка каждого файла
+    foreach ($file in $files) {
+        $mp4File = Join-Path $outPath ([System.IO.Path]::ChangeExtension($file.Name, ".mp4"))
+        $mp3File = Join-Path $outPath ([System.IO.Path]::ChangeExtension($file.Name, ".mp3"))
+        
+        $convertMp4 = Test-ShouldConvert -OutputFile $mp4File -Rewrite $Configuration.Rewrite -SkipConversion $false
+        $convertMp3 = Test-ShouldConvert -OutputFile $mp3File -Rewrite $Configuration.Rewrite -SkipConversion $Configuration.SkipMp3
+        
+        if (-not $convertMp4 -and -not $convertMp3) { continue }
+        
+        $mp4Success = $true
+        $mp3Success = $true
+        
+        # Конвертация в MP4
+        if ($convertMp4) {
+            $mp4Args = Get-Mp4Arguments -InputFile $file.FullName -OutputFile $mp4File
+            $mp4Success = Invoke-FfmpegConvert -InputFile $file.FullName -OutputFile $mp4File -Arguments $mp4Args -FormatName 'MP4'
+        }
+        
+        # Конвертация в MP3
+        if ($convertMp3) {
+            $mp3Args = Get-Mp3Arguments -InputFile $file.FullName -OutputFile $mp3File
+            $mp3Success = Invoke-FfmpegConvert -InputFile $file.FullName -OutputFile $mp3File -Arguments $mp3Args -FormatName 'MP3'
+        }
+        
+        # Перемещение оригинала
+        $shouldMove = if ($Configuration.SkipMp3) { $convertMp4 -and $mp4Success } else { $convertMp3 -and $mp3Success }
+        if ($shouldMove) {
+            Move-OriginalToDel -SourceFile $file.FullName -DestFolder $delPath
+        }
+    }
+    
+    Write-Log "Обработка завершена." -Level Success
 }
 
-Write-Host "Обработка завершена." -ForegroundColor Green
+# Запуск
+Start-Conversion

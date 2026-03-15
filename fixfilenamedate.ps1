@@ -1,114 +1,331 @@
-# Script to rename files by date from filename
+# Скрипт для переименования записей яндекс телемост по дате из имени файла
 param(
     [Parameter(Mandatory = $false)]
     [string]$folderPath = ".",
     [Parameter(Mandatory = $false)]
-    [switch]$rewrite
+    [switch]$rewrite,
+    [Parameter(Mandatory = $false)]
+    [switch]$interactive
 )
 
-# Check if folder exists
-if (-not (Test-Path $folderPath)) {
-    Write-Host "Folder not found: $folderPath" -ForegroundColor Red
-    exit 1
+# ============================================
+# Конфигурация
+# ============================================
+$Configuration = @{
+    FolderPath  = $folderPath
+    Rewrite     = $rewrite
+    Interactive = $interactive
 }
 
-# Get all files in folder
-$files = Get-ChildItem -Path $folderPath -File
-
-if ($files.Count -eq 0) {
-    Write-Host "No files found in folder: $folderPath" -ForegroundColor Yellow
-    exit 0
+# ============================================
+# Логирование
+# ============================================
+function Write-Log {
+    param(
+        [string]$Message,
+        [ValidateSet('Info', 'Success', 'Warning', 'Error')]
+        [string]$Level = 'Info'
+    )
+    $colors = @{
+        Info    = 'White'
+        Success = 'Green'
+        Warning = 'Yellow'
+        Error   = 'Red'
+    }
+    Write-Host $Message -ForegroundColor $colors[$Level]
 }
 
-$renamedCount = 0
-$skippedCount = 0
-$errorCount = 0
+# ============================================
+# Проверка пути
+# ============================================
+function Test-FolderPath {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) {
+        Write-Log "Папка не найдена: $Path" -Level Error
+        return $false
+    }
+    return $true
+}
 
-foreach ($file in $files) {
-    # Look for date and time in filename (format: DD.MM.YY HH-MM-SS)
-    if ($file.Name -match '(\d{2})\.(\d{2})\.(\d{2})\s+(\d{2})-(\d{2})-(\d{2})') {
-        $day = $matches[1]
-        $month = $matches[2]
-        $year = $matches[3]
-        $hour = $matches[4]
-        $minute = $matches[5]
-        $second = $matches[6]
-        
-        # Validate date
-        $fullYear = [int]$year + 2000
-        try {
-            $null = Get-Date -Year $fullYear -Month ([int]$month) -Day ([int]$day) -Hour ([int]$hour) -Minute ([int]$minute) -Second ([int]$second) -ErrorAction Stop
+# ============================================
+# Получение файлов
+# ============================================
+function Get-FilesFromFolder {
+    param([string]$Path)
+    return Get-ChildItem -Path $Path -File
+}
+
+# ============================================
+# Извлечение даты из имени файла
+# ============================================
+function Get-DateFromFileName {
+    param([string]$FileName)
+    
+    # Поиск даты и времени в формате: DD.MM.YY HH-MM-SS
+    if ($FileName -match '(\d{2})\.(\d{2})\.(\d{2})\s+(\d{2})-(\d{2})-(\d{2})') {
+        return @{
+            Day     = $matches[1]
+            Month   = $matches[2]
+            Year    = $matches[3]
+            Hour    = $matches[4]
+            Minute  = $matches[5]
+            Second  = $matches[6]
+            IsMatch = $true
         }
-        catch {
-            $timeStr = "${hour}:${minute}:${second}"
-            Write-Host "Invalid date in file: $($file.Name) (date: $day.$month.$year $timeStr)" -ForegroundColor Yellow
-            $errorCount++
-            continue
-        }
-        
-        # Format new date and time as YYYYMMDD_HHMMSS
-        $newDate = "{0:D4}{1:D2}{2:D2}" -f $fullYear, [int]$month, [int]$day
-        $newTime = "{0:D2}{1:D2}{2:D2}" -f [int]$hour, [int]$minute, [int]$second
-        
-        # Remove date and time from original filename
-        $nameWithoutDate = $file.Name -replace '\d{2}\.\d{2}\.\d{2}\s+\d{2}-\d{2}-\d{2}', ''
-        $nameWithoutDate = $nameWithoutDate.Trim()
-        
-        # Remove extra spaces, dashes and dots from start and end
-        $nameWithoutDate = $nameWithoutDate.TrimStart(' ', '-', '.')
-        $nameWithoutDate = $nameWithoutDate.TrimEnd(' ', '-', '.')
-        
-        # Get file extension
-        $extension = $file.Extension
-        
-        # If extension remains in nameWithoutDate, remove it
-        if ($nameWithoutDate.ToLower().EndsWith($extension.ToLower())) {
-            $nameWithoutDate = $nameWithoutDate.Substring(0, $nameWithoutDate.Length - $extension.Length)
-            $nameWithoutDate = $nameWithoutDate.Trim()
-            $nameWithoutDate = $nameWithoutDate.TrimStart(' ', '-', '.')
-            $nameWithoutDate = $nameWithoutDate.TrimEnd(' ', '-', '.')
-        }
-        
-        # If filename is empty after removing date, use "file"
-        if ([string]::IsNullOrWhiteSpace($nameWithoutDate)) {
-            $nameWithoutDate = "file"
-        }
-        
-        # Build new name: YYYYMMDD_HHMMSS name.extension
-        $newName = "{0}_{1} {2}{3}" -f $newDate, $newTime, $nameWithoutDate, $extension
-        
-        # Check if file with this name already exists
-        $newPath = Join-Path -Path $folderPath -ChildPath $newName
-        if ((Test-Path $newPath) -and (-not $rewrite)) {
-            Write-Host "File already exists, skipping: $newName" -ForegroundColor Yellow
-            $skippedCount++
-            continue
-        }
-        
-        # If file exists and rewrite is enabled, remove old file
-        if ((Test-Path $newPath) -and $rewrite) {
-            Remove-Item -Path $newPath -Force -ErrorAction SilentlyContinue
-        }
-        
-        # Rename file
-        try {
-            Rename-Item -Path $file.FullName -NewName $newName -ErrorAction Stop
-            Write-Host "Renamed: $($file.Name) -> $newName" -ForegroundColor Green
-            $renamedCount++
-        }
-        catch {
-            Write-Host "Error renaming file: $($file.Name) -> $newName`nError: $_" -ForegroundColor Red
-            $errorCount++
-        }
+    }
+    
+    return @{ IsMatch = $false }
+}
+
+# ============================================
+# Проверка корректности даты
+# ============================================
+function Test-ValidDate {
+    param(
+        [int]$Year,
+        [int]$Month,
+        [int]$Day,
+        [int]$Hour,
+        [int]$Minute,
+        [int]$Second
+    )
+    
+    try {
+        $null = Get-Date -Year $Year -Month $Month -Day $Day `
+            -Hour $Hour -Minute $Minute -Second $Second -ErrorAction Stop
+        return $true
+    }
+    catch {
+        return $false
     }
 }
 
-# Output statistics
-Write-Host "`nStatistics:" -ForegroundColor Cyan
-Write-Host "  Renamed: $renamedCount" -ForegroundColor Green
-if ($skippedCount -gt 0) {
-    Write-Host "  Skipped: $skippedCount" -ForegroundColor Yellow
+# ============================================
+# Форматирование новой даты
+# ============================================
+function Format-NewDateTime {
+    param(
+        [int]$Year,
+        [int]$Month,
+        [int]$Day,
+        [int]$Hour,
+        [int]$Minute,
+        [int]$Second
+    )
+    
+    $fullYear = $Year + 2000
+    $datePart = "{0:D4}{1:D2}{2:D2}" -f $fullYear, $Month, $Day
+    $timePart = "{0:D2}{1:D2}{2:D2}" -f $Hour, $Minute, $Second
+    
+    return @{
+        Date = $datePart
+        Time = $timePart
+    }
 }
-if ($errorCount -gt 0) {
-    Write-Host "  Errors: $errorCount" -ForegroundColor Red
+
+# ============================================
+# Очистка имени файла от даты
+# ============================================
+function Remove-DateFromFileName {
+    param(
+        [string]$FileName,
+        [string]$CustomName = ""
+    )
+
+    # Если передано пользовательское описание, используем его
+    if (-not [string]::IsNullOrWhiteSpace($CustomName)) {
+        return $CustomName.Trim()
+    }
+
+    # Удаление даты и времени из имени
+    $nameWithoutDate = $FileName -replace '\d{2}\.\d{2}\.\d{2}\s+\d{2}-\d{2}-\d{2}', ''
+    $nameWithoutDate = $nameWithoutDate.Trim()
+
+    # Удаление лишних символов с начала и конца
+    $nameWithoutDate = $nameWithoutDate.TrimStart(' ', '-', '.')
+    $nameWithoutDate = $nameWithoutDate.TrimEnd(' ', '-', '.')
+
+    # Удаление расширения, если оно осталось в имени
+    $extension = [System.IO.Path]::GetExtension($FileName)
+    if (-not [string]::IsNullOrEmpty($extension) -and $nameWithoutDate.ToLower().EndsWith($extension.ToLower())) {
+        $nameWithoutDate = $nameWithoutDate.Substring(0, $nameWithoutDate.Length - $extension.Length)
+        $nameWithoutDate = $nameWithoutDate.Trim()
+        $nameWithoutDate = $nameWithoutDate.TrimStart(' ', '-', '.')
+        $nameWithoutDate = $nameWithoutDate.TrimEnd(' ', '-', '.')
+    }
+
+    # Если имя пустое, используем значение по умолчанию
+    if ([string]::IsNullOrWhiteSpace($nameWithoutDate)) {
+        $nameWithoutDate = "file"
+    }
+
+    return $nameWithoutDate
 }
+
+# ============================================
+# Создание нового имени файла
+# ============================================
+function Build-NewFileName {
+    param(
+        [string]$Date,
+        [string]$Time,
+        [string]$Name,
+        [string]$Extension
+    )
+    return "{0}_{1} {2}{3}" -f $Date, $Time, $Name, $Extension
+}
+
+# ============================================
+# Переименование файла
+# ============================================
+function Rename-FileItem {
+    param(
+        [string]$SourcePath,
+        [string]$NewName
+    )
+    
+    try {
+        Rename-Item -Path $SourcePath -NewName $NewName -ErrorAction Stop
+        return $true
+    }
+    catch {
+        Write-Log "Ошибка переименования: $_" -Level Error
+        return $false
+    }
+}
+
+# ============================================
+# Обработка одного файла
+# ============================================
+function Invoke-FileRename {
+    param(
+        $File,
+        [string]$FolderPath,
+        [bool]$Rewrite,
+        [bool]$Interactive,
+        [ref]$Stats
+    )
+
+    # Извлечение даты из имени
+    $dateInfo = Get-DateFromFileName -FileName $File.Name
+
+    if (-not $dateInfo.IsMatch) {
+        return
+    }
+
+    # Преобразование в числа
+    $year = [int]$dateInfo.Year
+    $month = [int]$dateInfo.Month
+    $day = [int]$dateInfo.Day
+    $hour = [int]$dateInfo.Hour
+    $minute = [int]$dateInfo.Minute
+    $second = [int]$dateInfo.Second
+
+    # Проверка корректности даты
+    if (-not (Test-ValidDate -Year $year -Month $month -Day $day `
+                -Hour $hour -Minute $minute -Second $second)) {
+        $timeStr = "${hour}:${minute}:${second}"
+        Write-Log "Некорректная дата в файле: $($File.Name) (дата: $day.$month.$year $timeStr)" -Level Warning
+        $Stats.Value.Errors++
+        return
+    }
+
+    # Форматирование новой даты
+    $formatted = Format-NewDateTime -Year $year -Month $month -Day $day `
+        -Hour $hour -Minute $minute -Second $second
+
+    # Запрос пользовательского описания в интерактивном режиме
+    $customName = ""
+    if ($Interactive) {
+        $customName = Read-Host "Введите описание для файла '$($File.Name)' (Enter - без изменений)"
+    }
+
+    # Очистка имени от даты
+    $nameWithoutDate = Remove-DateFromFileName -FileName $File.Name -CustomName $customName
+
+    # Получение расширения
+    $extension = $File.Extension
+
+    # Создание нового имени
+    $newName = Build-NewFileName -Date $formatted.Date -Time $formatted.Time `
+        -Name $nameWithoutDate -Extension $extension
+
+    $newPath = Join-Path -Path $FolderPath -ChildPath $newName
+
+    # Проверка существования файла
+    if ((Test-Path $newPath) -and (-not $Rewrite)) {
+        Write-Log "Файл уже существует, пропускаем: $newName" -Level Warning
+        $Stats.Value.Skipped++
+        return
+    }
+
+    # Удаление существующего файла при режиме перезаписи
+    if ((Test-Path $newPath) -and $Rewrite) {
+        Remove-Item -Path $newPath -Force -ErrorAction SilentlyContinue
+    }
+
+    # Переименование
+    if (Rename-FileItem -SourcePath $File.FullName -NewName $newName) {
+        Write-Log "Переименовано: $($File.Name) -> $newName" -Level Success
+        $Stats.Value.Renamed++
+    }
+    else {
+        $Stats.Value.Errors++
+    }
+}
+
+# ============================================
+# Вывод статистики
+# ============================================
+function Write-Statistics {
+    param($Stats)
+    
+    Write-Log "`nСтатистика:" -Level Info
+    Write-Log "  Переименовано: $($Stats.Renamed)" -Level Success
+    if ($Stats.Skipped -gt 0) {
+        Write-Log "  Пропущено: $($Stats.Skipped)" -Level Warning
+    }
+    if ($Stats.Errors -gt 0) {
+        Write-Log "  Ошибок: $($Stats.Errors)" -Level Error
+    }
+}
+
+# ============================================
+# Основная функция
+# ============================================
+function Start-FileRename {
+    # Проверка пути
+    if (-not (Test-FolderPath -Path $Configuration.FolderPath)) {
+        exit 1
+    }
+    
+    # Получение файлов
+    $files = Get-FilesFromFolder -Path $Configuration.FolderPath
+    
+    if ($files.Count -eq 0) {
+        Write-Log "Файлы не найдены в папке: $($Configuration.FolderPath)" -Level Warning
+        exit 0
+    }
+    
+    # Инициализация счётчиков
+    $stats = @{
+        Renamed = 0
+        Skipped = 0
+        Errors  = 0
+    }
+    
+    # Обработка каждого файла
+    foreach ($file in $files) {
+        Invoke-FileRename -File $file `
+            -FolderPath $Configuration.FolderPath `
+            -Rewrite $Configuration.Rewrite `
+            -Interactive $Configuration.Interactive `
+            -Stats ([ref]$stats)
+    }
+    
+    # Вывод статистики
+    Write-Statistics -Stats $stats
+}
+
+# Запуск
+Start-FileRename
