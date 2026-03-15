@@ -158,6 +158,9 @@ function Start-Conversion {
             Write-Log "Запускаю переименование файлов по дате..." -Level Info
             & $fixScript -interactive
         }
+        else {
+            Write-Log "Скрипт fixfilenamedate.ps1 не найден. Переименование файлов пропущено." -Level Warning
+        }
     }
     else {
         Write-Log "Переименование файлов пропущено." -Level Info
