@@ -237,4 +237,13 @@ del/
 
 ## Лицензия
 
-MIT
+Проект распространяется под лицензией **GNU General Public License v3** (GPL-3.0).
+
+См. файл [LICENCE](LICENCE) для получения полной информации.
+
+---
+
+## Контакты
+
+Автор: alexd73  
+Репозиторий: [github.com/alexd73/telemost-tools](https://github.com/alexd73/telemost-tools)
